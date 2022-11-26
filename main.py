@@ -3,9 +3,11 @@ Main code for attendance Slackbot. This code is run when a POST request to the s
 (Serverless functions built on GCP's serverless framework.)
 """
 import time, hashlib, hmac, urllib, json, random
+import flask
 import slack_secrets
 import gsheets_handler
 import requests
+from multiprocessing import Process
 
 CHALLENGE = False
 
@@ -15,75 +17,61 @@ def parse_request(event):
     if CHALLENGE:
         r = event.get_data().decode("utf-8")
         r = json.loads(r)
-        return f"HTTP 200 OK\nContent-type: application/x-www-form-urlencoded\nchallenge={r['challenge']}"
+        return f"HTTP 200 OK\nContent-type: application/x-www-form-urlencoded\nchallenge={r['challenge']}", 200
 
     # check if the app is being rate limited
     if event.get_json()['type'] == 'app_rate_limited':
         print("App rate limited")
-        return "HTTP 200 OK"
+        return "HTTP 200 OK", 200
+
+    # if the event is a retry, don't retry
+    if event.headers.get('X-Slack-Retry-Num'):
+        print("App retried")
+        return "OK", 200
 
     # verify that the request came from Slack
     if not verifySlackRequest(event):
-        return {
-            'statusCode': 401,
-            'body': 'Unauthorized'
-        }
+        resp = flask.Response("Unauthorized")
+        return resp, 401
     
-    # route the request to the appropriate handler
+    # route the request to the appropriate handler in a new thread
     data = event.get_json()
     user_id = data['event']['user']
-    return router(data, user_id)
+    process = Process(target=router, args=(data, user_id))
+    process.start()
+
+    return "Success", 200
 
 # route the request to the appropriate gsheets handler
 def router(data, user_id):
     text = data['event']['text']
     channel_id = data['event']['channel']
-    if 'register' in text.lower():
+    t = text.lower()
+    if 'register' in t:
         info = gsheets_handler.register_user_handler(user_id, text)
         msg = create_message(info['header'], info['body'], error=True if "Error" in info['header'] else False)
         send_message(msg, channel_id, user_id)
-        return {
-            'statusCode': 200,
-            'body': 'OK'
-        }
-    elif 'newevent' in text.lower():
+    elif 'newevent' in t:
         info = gsheets_handler.create_event_handler(user_id, text)
         msg = create_message(info['header'], info['body'], error=True if "Error" in info['header'] else False)
         send_message(msg, channel_id, user_id)
-        return {
-            'statusCode': 200,
-            'body': 'OK'
-        }
-    elif 'checkin' in text.lower():
+    elif 'checkin' in t:
         info = gsheets_handler.checkin_handler(user_id, text)
         msg = create_message(info['header'], info['body'], error=True if "Error" in info['header'] else False)
         send_message(msg, channel_id, user_id)
-        return {
-            'statusCode': 200,
-            'body': 'OK'
-        }
-    elif 'updateme' in text.lower():
+    elif 'updateme' in t:
         info = gsheets_handler.update_user_handler(user_id)
         msg = create_message(info['header'], info['body'], error=True if "Error" in info['header'] else False)
         send_message(msg, channel_id, user_id)
-        return {
-            'statusCode': 200,
-            'body': 'OK'
-        }
-    elif 'eventstatus' in text.lower():
+    elif 'eventstatus' in t:
         info = gsheets_handler.event_status_handler(user_id, text)
         msg = create_message(info['header'], info['body'], error=True if "Error" in info['header'] else False)
         send_message(msg, channel_id, user_id)
-        return {
-            'statusCode': 200,
-            'body': 'OK'
-        }
     else:
         send_message(help, channel_id, user_id)
-        return {
-            'statusCode': 200,
-            'body': 'OK'
-        }
+    resp = flask.Response("Success")
+    resp.headers["X-Slack-No-Retry"] = 1
+    return resp
 
 
 """ HELPER FUNCTIONS """
